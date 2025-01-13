@@ -1,0 +1,323 @@
+// ==UserScript==
+// @name         问卷星自动填写
+// @namespace    http://tampermonkey.net/
+// @version      1.3
+// @description  自动填写问卷星问卷，支持Moonshot AI生成答案
+// @author       Bin
+// @match        https://www.wjx.cn/vm/*
+// @grant        GM_xmlhttpRequest
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    
+    // AI配置
+    const API_KEY = "-----------";
+    const API_URL = "https://api.moonshot.cn/v1/chat/completions";
+    
+    // 请求限制配置
+    const REQUEST_LIMIT = 3; // 每分钟最大请求数
+    const REQUEST_INTERVAL = 60000; // 重置间隔(ms)
+    let requestCount = 0;
+    let requestQueue = [];
+    let isProcessingQueue = false;
+
+    // 重置请求计数器
+    setInterval(() => {
+        requestCount = 0;
+    }, REQUEST_INTERVAL);
+
+    // AI回答生成函数
+    async function generateAIResponse(question) {
+        return new Promise((resolve, reject) => {
+            // 将请求添加到队列
+            requestQueue.push({
+                question,
+                resolve,
+                reject
+            });
+            
+            // 如果没有正在处理的请求，开始处理队列
+            if (!isProcessingQueue) {
+                processQueue();
+            }
+        });
+    }
+
+    // 处理请求队列
+    async function processQueue() {
+        if (isProcessingQueue || requestQueue.length === 0) {
+            return;
+        }
+
+        isProcessingQueue = true;
+
+        while (requestQueue.length > 0) {
+            if (requestCount >= REQUEST_LIMIT) {
+                // 等待重置
+                await new Promise(resolve => setTimeout(resolve, REQUEST_INTERVAL));
+                requestCount = 0;
+            }
+
+            const request = requestQueue.shift();
+            try {
+                requestCount++;
+                const response = await makeAIRequest(request.question);
+                request.resolve(response);
+            } catch (error) {
+                console.error("AI请求失败:", error);
+                request.resolve(randomTexts.normal[Math.floor(Math.random() * randomTexts.normal.length)]);
+            }
+
+            // 请求之间添加延迟
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        isProcessingQueue = false;
+    }
+
+    // 发送AI请求
+    async function makeAIRequest(question) {
+        try {
+            const response = await new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: API_URL,
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${API_KEY}`
+                    },
+                    data: JSON.stringify({
+                        model: "moonshot-v1-8k",
+                        messages: [
+                            {
+                                role: "system",
+                                content: "你是一个问卷填写助手。请针对问题给出20-40字的简短回答，语气要自然。"
+                            },
+                            {
+                                role: "user",
+                                content: question
+                            }
+                        ],
+                        temperature: 0.3
+                    }),
+                    onload: function(response) {
+                        resolve(JSON.parse(response.responseText));
+                    },
+                    onerror: function(error) {
+                        reject(error);
+                    }
+                });
+            });
+
+            return response.choices[0].message.content.trim();
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    // 修改状态显示
+    function updateStatus(text) {
+        const status = document.getElementById('status');
+        const requestInfo = `(剩余请求次数: ${REQUEST_LIMIT - requestCount})`;
+        status.textContent = `${text} ${requestInfo}`;
+    }
+
+    // 获取题目文本
+    function getQuestionText(div) {
+        const questionDiv = div.querySelector('.topichtml');
+        return questionDiv ? questionDiv.textContent.trim() : '';
+    }
+
+    // 修改处理单选题的函数
+    async function handleRadio(div) {
+        const options = div.querySelectorAll('.ui-radio');
+        if(options.length > 0) {
+            const randomIndex = Math.floor(Math.random() * options.length);
+            const radio = options[randomIndex].querySelector('.jqradio');
+            radio.click();
+            
+            // 检查并处理关联的文本框
+            setTimeout(async () => {
+                const textInput = div.querySelector('input.OtherRadioText');
+                if(textInput && textInput.offsetParent !== null) { // 检查文本框是否可见
+                    const question = getQuestionText(div);
+                    generateAIResponse(question).then(aiResponse => {
+                        textInput.value = aiResponse;
+                        textInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    });
+                }
+            }, 100); // 给予短暂延迟让文本框显示出来
+        }
+    }
+
+    // 修改处理多选题的函数
+    async function handleCheckbox(div) {
+        const options = div.querySelectorAll('.ui-checkbox');
+        if(options.length > 0) {
+            // 过滤掉最后一个选项和包含"其他"的选项
+            const validOptions = Array.from(options).filter((option, index) => {
+                const label = option.querySelector('.label');
+                return label && 
+                       !label.textContent.includes('其他') && 
+                       index !== options.length - 1;
+            });
+
+            if(validOptions.length > 0) {
+                // 随机选择1-3个选项
+                const selectCount = Math.min(
+                    Math.floor(Math.random() * 3) + 1,
+                    validOptions.length
+                );
+                const selectedIndexes = new Set();
+                
+                while(selectedIndexes.size < selectCount) {
+                    const randomIndex = Math.floor(Math.random() * validOptions.length);
+                    if(!selectedIndexes.has(randomIndex)) {
+                        selectedIndexes.add(randomIndex);
+                        const checkbox = validOptions[randomIndex].querySelector('.jqcheck');
+                        checkbox.click();
+                        
+                        // 异步处理文本框
+                        setTimeout(async () => {
+                            const textInput = validOptions[randomIndex].querySelector('input.OtherText');
+                            if(textInput && textInput.offsetParent !== null) {
+                                const question = getQuestionText(div);
+                                generateAIResponse(question).then(aiResponse => {
+                                    textInput.value = aiResponse;
+                                    textInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                });
+                            }
+                        }, 100);
+                    }
+                }
+            } else if(options.length > 1) {
+                // 如果没有有效选项，随机选择一个非最后的选项
+                const randomIndex = Math.floor(Math.random() * (options.length - 1));
+                const checkbox = options[randomIndex].querySelector('.jqcheck');
+                checkbox.click();
+            }
+        }
+    }
+
+    // 修改处理填空题的函数
+    async function handleText(div) {
+        const input = div.querySelector('input[type="text"]');
+        if(input) {
+            const question = getQuestionText(div);
+            try {
+                const aiResponse = await generateAIResponse(question);
+                input.value = aiResponse;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            } catch (error) {
+                console.error("处理填空题失败:", error);
+                input.value = randomTexts.normal[Math.floor(Math.random() * randomTexts.normal.length)];
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }
+    }
+
+    // 添加控制面板
+    const panel = document.createElement('div');
+    panel.innerHTML = `
+        <div id="autoFillPanel" style="position:fixed;top:10px;right:10px;background:#fff;padding:10px;border:1px solid #ccc;z-index:9999;">
+            <div>状态: <span id="status">等待开始...</span></div>
+            <button id="startFill">手动开始</button>
+            <button id="submitForm">提交问卷</button>
+        </div>
+    `;
+    document.body.appendChild(panel);
+
+    // 随机文本生成
+    const randomTexts = {
+        normal: [
+            "希望课程内容更加丰富多样",
+            "期待有更多实践机会",
+            "希望能学到更多实用知识",
+            "希望增加互动交流环节",
+            "期待更专业的授课内容"
+        ],
+        other: [
+            "其他想法",
+            "个人建议",
+            "特殊情况",
+            "补充说明",
+            "自定义内容"
+        ]
+    };
+
+    // 随机延迟函数
+    function randomDelay(min, max) {
+        const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+        return new Promise(resolve => setTimeout(resolve, delay));
+    }
+
+    // 滚动到元素位置
+    function scrollToElement(element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    // 修改自动填写问卷函数
+    async function autoFill() {
+        updateStatus('正在填写...');
+        const questions = document.querySelectorAll('.field');
+        
+        for(const div of questions) {
+            const type = div.getAttribute('type');
+            
+            // 不等待AI响应，直接处理下一题
+            try {
+                switch(type) {
+                    case '3': // 单选题
+                        handleRadio(div);
+                        break;
+                    case '4': // 多选题
+                        handleCheckbox(div);
+                        break;
+                    case '1': // 填空题
+                        const input = div.querySelector('input[type="text"]');
+                        if(input) {
+                            const question = getQuestionText(div);
+                            // 异步处理AI回答
+                            generateAIResponse(question).then(aiResponse => {
+                                input.value = aiResponse;
+                                input.dispatchEvent(new Event('input', { bubbles: true }));
+                            });
+                        }
+                        break;
+                }
+            } catch (error) {
+                console.error("处理题目失败:", error);
+            }
+            
+            // 快速滚动到下一题
+            scrollToElement(div);
+            await randomDelay(200, 500); // 缩短延迟时间
+        }
+
+        const submitBtn = document.querySelector('.submitbutton');
+        if(submitBtn) {
+            scrollToElement(submitBtn);
+            updateStatus('填写完成！');
+        }
+    }
+
+    // 页面加载完成后自动开始
+    window.addEventListener('load', async () => {
+        await randomDelay(1000, 2000); // 等待1-2秒后开始
+        autoFill();
+    });
+
+    // 绑定按钮事件
+    document.getElementById('startFill').addEventListener('click', async () => {
+        await autoFill();
+    });
+
+    document.getElementById('submitForm').addEventListener('click', () => {
+        const submitBtn = document.querySelector('.submitbutton');
+        if(submitBtn) {
+            submitBtn.click();
+        }
+    });
+
+})(); 
