@@ -23,6 +23,7 @@
 在脚本开头部分配置你的 Moonshot AI API：
   需要去Moonshot官网申请一下key并替换
   Moonshot官网：https://platform.moonshot.cn/
+  由于Moonshot官网对于免费的开发者仅支持3次/min，所以本脚本有做超过3次等待1min
   
 ## 🎮 使用方法
 
